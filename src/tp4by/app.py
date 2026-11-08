@@ -95,8 +95,7 @@ class Application:
                         ):
                             key = ("g", message.grouped_id) if message.grouped_id else ("m", message.id)
                             grouped[key].append(message)
-                        for messages in grouped.values():
-                            backlog.append(messages)
+                        backlog.extend(grouped.values())
                     checkpoints.append((chat, max(row[0], high) if row else high, row[1] if row else high))
                 # Do not let a live manual operation overtake history discovered during startup.
                 for messages in sorted(backlog + buffered, key=lambda group: (group[0].date, group[0].id)):

@@ -362,6 +362,9 @@ def test_grouped_prepare_collects_neighbors_and_complete_captions(tmp_path):
     event = {**payload([19, 25]), "grouped": True}
     with pytest.raises(LookupError):
         run(gateway(tmp_path, client).prepare(event))
+    event = {**payload([19, 22]), "grouped": True}
+    with pytest.raises(LookupError, match="no longer form the expected album"):
+        run(gateway(tmp_path, client).prepare(event))
 
 
 def test_grouped_unsupported_media_still_enriches_manual_forward_payload(tmp_path):

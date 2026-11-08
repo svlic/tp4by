@@ -27,6 +27,7 @@ async def test_offline_replay_is_chronological_and_ignores_own_posts(tmp_path, m
         message("from", 101, 1, "A", 77),
         message("up", 201, 2, "B", forward=True),
         message("from", 102, 3, "Z", 78),
+        message("from", 103, 3, "Z2", 78),
         message("up", 202, 4, "ignored-system-output"),
     ]
     history = {chat: [m for m in raw if m.chat_id == chat] for chat in chats.values()}
@@ -95,6 +96,7 @@ async def test_offline_replay_is_chronological_and_ignores_own_posts(tmp_path, m
             ("up", "up"),
             ("from", "oneshot"),
         ]
+        assert store.records()[3]["source"]["message_ids"] == [102, 103]
         # Reconnect overlap must not import anything below the original first-start floor.
         assert all(row[0] == 100 for row in store.db.execute("SELECT floor FROM cursors"))
     finally:

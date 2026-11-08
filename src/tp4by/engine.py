@@ -22,10 +22,10 @@ class Gateway(Protocol):
 
 
 def business_number(text: str) -> str:
-    numbers = list(dict.fromkeys(NUMBER.findall(text)))
+    numbers = set(NUMBER.findall(text))
     if len(numbers) != 1:
         raise ValueError("必须且只能包含一个不同的 6/7 位业务编号")
-    return numbers[0]
+    return numbers.pop()
 
 
 def expand(records: dict[int, dict], seeds: set[int], links=()) -> set[int]:
@@ -44,16 +44,18 @@ def expand(records: dict[int, dict], seeds: set[int], links=()) -> set[int]:
 
 
 def presentation(records: list[dict]) -> tuple[list[dict], str]:
-    media, seen, numbers = [], set(), []
+    copies = {}
+    for record in records:
+        for item in record["media"]:
+            copies.setdefault(item["key"], []).append(item["path"])
+    media, numbers = [], []
     for record in records:
         if record["business_no"] not in numbers:
             numbers.append(record["business_no"])
         for item in record["media"]:
-            if item["key"] not in seen:
+            if item["key"] in copies:
                 # Persist all copies; gateway can try the next if the earliest cache is unavailable.
-                copies = [m["path"] for r in records for m in r["media"] if m["key"] == item["key"]]
-                media.append({**item, "copies": list(dict.fromkeys(copies))})
-                seen.add(item["key"])
+                media.append({**item, "copies": list(dict.fromkeys(copies.pop(item["key"])))})
     return media, " ".join(numbers)
 
 
@@ -138,13 +140,11 @@ class Engine:
         up = set().union(*(r["hashes"] for r in old.values() if r["route"] == "up"))
         history = set().union(*(r["hashes"] for r in old.values()))
         origin = payload["origin"]
-        route = (
-            origin
-            if origin != "from"
-            else ("down" if hashes & down else "up" if hashes & up else "repeat" if hashes & history else "oneshot")
-        )
+        route = origin
         if hashes & down:
             route = "down"  # Even manual UP cannot override an existing DOWN hash.
+        elif origin == "from":
+            route = "up" if hashes & up else "repeat" if hashes & history else "oneshot"
         rid = db.execute(
             "INSERT INTO records(event_key,business_no,origin,route,media,source) VALUES (?,?,?,?,?,?)",
             (payload["event_key"], number, origin, route, encode(media), encode(payload)),

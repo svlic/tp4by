@@ -5,8 +5,52 @@ import pytest
 from telethon.errors import FloodWaitError
 
 from tp4by import engine as engine_module
-from tp4by.engine import Engine
+from tp4by.engine import Engine, business_number, presentation
 from tp4by.storage import Store
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("123456 123456", "123456"),
+        ("a1234567!", "1234567"),
+        ("012345", "012345"),
+        ("", None),
+        ("123456 7654321", None),
+        ("12345 12345678", None),
+        ("１２３４５６", None),
+        ("١123456", None),
+        ("123456٧", None),
+    ],
+)
+def test_business_number_uniqueness_and_digit_boundaries(text, expected):
+    if expected is None:
+        with pytest.raises(ValueError, match="必须且只能包含一个不同的 6/7 位业务编号"):
+            business_number(text)
+    else:
+        assert business_number(text) == expected
+
+
+def test_presentation_preserves_first_metadata_and_unique_copy_order_without_mutating_input():
+    records = [
+        {"business_no": "7654321", "media": [{"key": "B", "path": "b-old", "as_document": True}]},
+        {
+            "business_no": "123456",
+            "media": [{"key": "A", "path": "a"}, {"key": "B", "path": "b-new", "as_document": False}],
+        },
+        {"business_no": "7654321", "media": [{"key": "B", "path": "b-old"}, {"key": "C", "path": "c"}]},
+    ]
+    original = copy.deepcopy(records)
+    assert presentation(records) == (
+        [
+            {"key": "B", "path": "b-old", "as_document": True, "copies": ["b-old", "b-new"]},
+            {"key": "A", "path": "a", "copies": ["a"]},
+            {"key": "C", "path": "c", "copies": ["c"]},
+        ],
+        "7654321 123456",
+    )
+    assert records == original
+    assert presentation([]) == ([], "")
 
 
 class FakeGateway:
@@ -140,6 +184,38 @@ async def test_down_beats_up_for_entire_record_without_number_link_spill(system)
     assert routes(store) == ["down", "down", "down", "down"]
     assert keys(gateway.media("down")[-1]) == ["A", "B", "C"]
     assert store.db.execute("SELECT COUNT(*) FROM up_groups").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("origin", ["from", "up", "down"])
+@pytest.mark.parametrize(
+    "incoming,from_route",
+    [
+        (["X"], "oneshot"),
+        (["H", "X"], "repeat"),
+        (["U", "X"], "up"),
+        (["D", "X"], "down"),
+        (["H", "U", "X"], "up"),
+        (["H", "D", "X"], "down"),
+        (["U", "D", "X"], "down"),
+        (["H", "U", "D", "X"], "down"),
+    ],
+)
+async def test_routing_priority_for_from_and_manual_inputs(system, origin, incoming, from_route):
+    store, gateway, _ = system
+    await add(system, "111111", ["H"])
+    await add(system, "222222", ["U"], "up")
+    await add(system, "333333", ["D"], "down")
+    expected = from_route if origin == "from" else "down" if "D" in incoming else origin
+    sent_before = len(gateway.sent)
+    payload = await add(system, "444444", incoming, origin)
+    assert routes(store)[-1] == expected
+    assert store.db.execute("SELECT status FROM jobs ORDER BY id DESC LIMIT 1").fetchone()[0] == "done"
+    if origin == "down":
+        archive = store.db.execute("SELECT messages FROM archives WHERE record_id=4 AND channel='down'").fetchone()
+        assert json.loads(archive[0]) == payload["message_ids"]
+        assert ("down", payload["message_ids"]) not in gateway.deleted
+    else:
+        assert any(target == expected for target, _, _ in gateway.sent[sent_before:])
 
 
 async def test_up_merges_two_groups_and_skips_unchanged_display(system):
