@@ -86,6 +86,77 @@ def batches(media: list[dict], caption: str) -> list[dict]:
 class Engine:
     def __init__(self, store: Store, gateway: Gateway, retries: int = 5):
         self.store, self.gateway, self.retries = store, gateway, retries
+        # Older versions left unpublished failed jobs in the classification indexes.
+        with store.db:
+            failed = store.db.execute(
+                "SELECT * FROM jobs WHERE status='failed' AND plan IS NOT NULL ORDER BY id DESC"
+            ).fetchall()
+            dirty_legacy = any(
+                "sends" in (plan := json.loads(job["plan"]))
+                and "undo" not in plan
+                and not plan.get("published")
+                and not plan.get("abandoned")
+                for job in failed
+            )
+            if dirty_legacy:
+                # A legacy pending plan may depend on failed history. Preserve its
+                # partial sends for MAN rather than resume an invalid classification.
+                for job in store.db.execute(
+                    "SELECT * FROM jobs WHERE status='pending' AND plan IS NOT NULL ORDER BY id DESC"
+                ).fetchall():
+                    if not json.loads(job["plan"]).get("published"):
+                        self._abandon(job)
+                        store.db.execute(
+                            "UPDATE jobs SET status='failed',next_at=0,error=? WHERE id=?",
+                            ("旧失败历史已撤回，依赖该历史的未发布计划转 MAN", job["id"]),
+                        )
+            for job in failed:
+                self._abandon(job)
+
+    def _abandon(self, job):
+        """Discard provisional business state, not remotely sent media or failure evidence."""
+        plan = json.loads(job["plan"]) if job["plan"] else {}
+        if "sends" not in plan or plan.get("published") or plan.get("abandoned"):
+            return
+        db = self.store.db
+        record = db.execute("SELECT id FROM records WHERE event_key=?", (job["event_key"],)).fetchone()
+        if "undo" in plan:
+            undo = plan["undo"]
+        else:
+            # Legacy plans have no snapshot. Published mappings are the available
+            # evidence of successful history; never infer success from route alone.
+            routes = {}
+            for row in db.execute("SELECT record_id,channel FROM archives"):
+                previous = routes.get(row[0])
+                if previous != "down":
+                    routes[row[0]] = row[1]
+            for row in db.execute("SELECT members FROM up_groups"):
+                for rid in json.loads(row[0]):
+                    if routes.get(rid) != "down":
+                        routes[rid] = "up"
+            undo = {
+                "routes": [[rid, route] for rid, route in routes.items()],
+                "down_hashes": [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT hash FROM down_hashes EXCEPT "
+                        "SELECT h.hash FROM media_hashes h JOIN archives a ON a.record_id=h.record_id "
+                        "WHERE a.channel='down'"
+                    )
+                ],
+            }
+            # A later legacy job may already have successfully archived this input.
+            if record and record[0] in routes:
+                record = None
+        if record:
+            rid = record[0]
+            db.execute("DELETE FROM manual_operations WHERE record_id=?", (rid,))
+            db.execute("DELETE FROM media_hashes WHERE record_id=?", (rid,))
+            db.execute("DELETE FROM records WHERE id=?", (rid,))
+        db.executemany("UPDATE records SET route=? WHERE id=?", [(route, rid) for rid, route in undo["routes"]])
+        db.executemany("DELETE FROM down_hashes WHERE hash=?", [(h,) for h in undo["down_hashes"]])
+        plan["abandoned"] = True
+        db.execute("UPDATE jobs SET plan=? WHERE id=?", (encode(plan), job["id"]))
 
     async def tick(self) -> bool:
         job = self.store.next_job()
@@ -119,6 +190,9 @@ class Engine:
             attempts = job["attempts"] + 1
             terminal = isinstance(error, ValueError) or attempts >= self.retries
             with self.store.db:
+                if terminal:
+                    current = self.store.db.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone()
+                    self._abandon(current)
                 self.store.db.execute(
                     "UPDATE jobs SET attempts=?,next_at=?,error=?,status=?,payload=? WHERE id=?",
                     (
@@ -235,6 +309,12 @@ class Engine:
         for r, item in records.items():
             if item["origin"] == "up" and item["route"] == "up" and not item["source"].get("replaced"):
                 plan["cleanup"].append({"channel": "up", "ids": item["source"]["message_ids"], "manual_rid": r})
+        # Pending jobs block all later business. Their mutations become history
+        # only at publication; terminal pre-publication failure restores this delta.
+        plan["undo"] = {
+            "routes": [[r, item["route"]] for r, item in old.items() if item["route"] != records[r]["route"]],
+            "down_hashes": sorted({row[0] for row in db.execute("SELECT hash FROM down_hashes")} - down),
+        }
         return plan
 
     async def _execute(self, job_id: int, plan: dict):
@@ -287,9 +367,13 @@ class Engine:
         if row is None:
             return False
         payload = json.loads(row["payload"])
-        message = f"T4BY 异常\n事件：{row['event_key']}\n错误：{row['error']}\n原文：{payload.get('text', '')}"
         # Notification and media each use stable tokens and independent persisted progress.
         plan = json.loads(row["plan"]) if row["plan"] else {}
+        phase = "归档已成功，旧消息清理失败" if plan.get("published") else "归档未成功，不计入历史"
+        message = (
+            f"T4BY 异常\n任务：{row['id']}\n事件：{row['event_key']}\n阶段：{phase}\n"
+            f"错误：{row['error']}\n原文：{payload.get('text', '')}"
+        )
         specs = [
             {"type": "text", "text": message[:2000]},
             {"type": "forward", "chat_id": payload["chat_id"], "message_ids": payload["message_ids"]},

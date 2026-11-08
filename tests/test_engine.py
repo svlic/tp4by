@@ -173,6 +173,20 @@ async def test_down_closure_incremental_and_manual_original_preserved(system):
     assert [target for target, _ in gateway.deleted] == ["oneshot"]
 
 
+async def test_manual_down_number_seeds_disjoint_media_then_only_expands_hashes(system):
+    store, gateway, _ = system
+    await add(system, "123456", ["A"])
+    await add(system, "234567", ["A", "C"])
+    await add(system, "234567", ["D"])
+    manual = await add(system, "123456", ["B"], "down")
+    assert routes(store) == ["down", "down", "oneshot", "down"]
+    assert [keys(spec) for spec in gateway.media("down")] == [["A"], ["A", "C"]]
+    assert ("down", manual["message_ids"]) not in gateway.deleted
+    await add(system, "345678", ["B"])
+    await add(system, "456789", ["D"])
+    assert routes(store)[-2:] == ["down", "repeat"]
+
+
 async def test_down_beats_up_for_entire_record_without_number_link_spill(system):
     store, gateway, _ = system
     await add(system, "123456", ["A"])
@@ -316,6 +330,110 @@ async def test_retry_exhaustion_reports_and_preserves_oneshot(system):
     assert store.db.execute("SELECT COUNT(*) FROM archives WHERE channel='oneshot'").fetchone()[0] == 1
     assert await engine.report_failure()
     assert gateway.sent[-1][0] == "man"
+
+
+@pytest.mark.parametrize("origin", ["from", "up", "down"])
+async def test_failed_archive_does_not_change_successful_history(system, origin):
+    store, gateway, engine = system
+    engine.retries = 1
+    await add(system, "123456", ["A"])
+    await add(system, "999999", ["X"], "down")
+    gateway.fail = lambda channel, spec: channel != "man"
+    failed = await add(system, "123456", ["B"], origin)
+    assert routes(store) == ["oneshot", "down"]
+    assert await engine.report_failure()
+    assert gateway.sent[-1][1]["message_ids"] == failed["message_ids"]
+    assert not store.enqueue(failed)
+    gateway.fail = None
+    await add(system, "234567", ["B"])
+    await add(system, "345678", ["A"])
+    await add(system, "456789", ["X"])
+    assert routes(store) == ["oneshot", "down", "oneshot", "repeat", "down"]
+    assert sorted(row[0] for row in store.db.execute("SELECT hash FROM down_hashes")) == ["image:phash:X"]
+
+
+async def test_exhausted_partial_up_is_not_rebuilt_by_unrelated_input(system, tmp_path):
+    store, gateway, engine = system
+    engine.retries = 1
+    await add(system, "123456", ["A"], "up")
+    await add(system, "234567", [str(i) for i in range(10)])
+    old_group = tuple(store.db.execute("SELECT * FROM up_groups").fetchone())
+    gateway.fail = lambda channel, spec: channel == "up" and len(spec.get("items", [])) == 2
+    await add(system, "345678", ["A", "0", "Z"])
+    assert routes(store) == ["up", "oneshot"]
+    assert tuple(store.db.execute("SELECT * FROM up_groups").fetchone()) == old_group
+    store.close()
+    recovered = Store(tmp_path / "state.sqlite3")
+    try:
+        gateway.fail = None
+        engine = Engine(recovered, gateway)
+        await add((recovered, gateway, engine), "456789", ["Q"])
+        assert [len(spec["items"]) for spec in gateway.media("up")] == [1, 10]
+        assert tuple(recovered.db.execute("SELECT * FROM up_groups").fetchone()) == old_group
+        assert ("up", json.loads(old_group[2])) not in gateway.deleted
+        assert await engine.report_failure()
+    finally:
+        recovered.close()
+
+
+async def test_cleanup_failure_preserves_published_history_and_reports_phase(system):
+    store, gateway, engine = system
+    engine.retries = 1
+    await add(system, "123456", ["A"], "up")
+    old_ids = json.loads(store.db.execute("SELECT messages FROM up_groups").fetchone()[0])
+
+    async def fail_delete(channel, ids):
+        raise OSError("delete permission denied")
+
+    gateway.delete = fail_delete
+    await add(system, "234567", ["A", "B"])
+    assert routes(store) == ["up", "up"]
+    current_group = tuple(store.db.execute("SELECT * FROM up_groups").fetchone())
+    assert json.loads(current_group[2]) != old_ids
+    assert await engine.report_failure()
+    notice = next(spec["text"] for channel, spec, _ in gateway.sent if channel == "man")
+    assert "清理" in notice
+    await add(system, "345678", ["Q"])
+    assert tuple(store.db.execute("SELECT * FROM up_groups").fetchone()) == current_group
+    assert [keys(spec) for spec in gateway.media("up")] == [["A"], ["A", "B"]]
+
+
+@pytest.mark.parametrize("following", ["none", "pending", "published"])
+async def test_legacy_failed_plan_is_excluded_from_history_on_restart(system, tmp_path, following):
+    store, gateway, engine = system
+    await add(system, "123456", ["A"])
+    gateway.fail = lambda channel, spec: channel == "down"
+    await add(system, "123456", ["B"], "down")
+    # Recreate the pre-fix format: provisional mutations remain after terminal failure.
+    row = store.db.execute("SELECT id,plan FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
+    plan = json.loads(row["plan"])
+    plan.pop("undo", None)
+    with store.db:
+        store.db.execute("UPDATE jobs SET status='failed',plan=? WHERE id=?", (json.dumps(plan), row["id"]))
+    if following != "none":
+        if following == "published":
+            gateway.fail = None
+        await add(system, "345678", ["C"])
+        row = store.db.execute("SELECT id,plan FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
+        plan = json.loads(row["plan"])
+        plan.pop("undo", None)
+        with store.db:
+            store.db.execute("UPDATE jobs SET plan=? WHERE id=?", (json.dumps(plan), row["id"]))
+    store.close()
+    recovered = Store(tmp_path / "state.sqlite3")
+    try:
+        gateway.fail = None
+        engine = Engine(recovered, gateway)
+        expected = ["down", "down", "oneshot"] if following == "published" else ["oneshot"]
+        assert routes(recovered) == expected
+        await add((recovered, gateway, engine), "234567", ["B"])
+        assert routes(recovered) == expected + ["down" if following == "published" else "oneshot"]
+        if following != "published":
+            assert not list(recovered.db.execute("SELECT * FROM down_hashes"))
+        if following == "pending":
+            assert recovered.db.execute("SELECT COUNT(*) FROM jobs WHERE status='failed'").fetchone()[0] == 2
+    finally:
+        recovered.close()
 
 
 async def test_floodwait_and_man_retry_respect_wait_and_keep_progress(system, monkeypatch):
