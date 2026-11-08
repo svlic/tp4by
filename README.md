@@ -23,14 +23,19 @@ Python 3.11+ / Telethon 用户账号 / SQLite WAL。不包含 Reader、SOURCE、
 
 ## Docker 部署
 
+需要 Docker Engine 和 Docker Compose v2+。默认使用 `ghcr.io/svlic/tp4by:latest`，
+同一镜像标签包含 `linux/amd64` 和 `linux/arm64`（64 位 ARM），Docker 自动选择主机架构。
+
 需要一个 Telegram **用户账号**（不是 Bot Token），账号必须能够读取三个输入频道、在归档频道发媒体，并删除 ONESHOT/UP 的旧消息。
 六个频道必须互不相同。请先在测试频道验证权限和清理行为。
 
 ```bash
+git clone https://github.com/svlic/tp4by.git
+cd tp4by
 cp .env.example .env
 # 编辑 .env，填写 Writer API ID / API Hash 和六个频道 ID（也支持公开用户名）。
-docker compose build
-docker compose run --rm tp4by
+docker compose pull
+docker compose run --rm --no-deps tp4by
 ```
 
 首次在交互终端输入手机号、验证码和可能的两步验证密码。看到 `T4BY started` 后按 Ctrl+C，再后台启动：
@@ -44,9 +49,45 @@ docker compose logs -f tp4by
 在线消息在启动历史补录后入队，历史按 Telegram 时间排序（同秒跨频道没有严格全局顺序）。
 游标在启动补录后推进，长期运行后的首次重启可能扫描较多已处理消息，但事件唯一键会跳过重复。
 
-`tp4by-data` volume 保存登录 session、数据库和媒体原件。升级时重新 build，然后 `docker compose up -d`。
+升级镜像（登录状态和数据保留）：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+可在 `.env` 中添加 `TP4BY_IMAGE=ghcr.io/svlic/tp4by:v0.1.0` 固定到已发布的版本标签
+（示例标签，实际以仓库 Packages 为准），或使用 `sha-<短提交号>` 固定提交。
+若镜像尚未发布，或需要运行本地修改，可从源码构建，无需访问 GHCR：
+
+```bash
+docker compose build
+docker compose run --rm --no-deps --pull never tp4by
+# 完成首次登录并按 Ctrl+C 后：
+docker compose up -d --pull never
+```
+
+本地构建后的升级使用 `git pull`、`docker compose build` 和 `docker compose up -d --pull never`。
+不要同时运行登录容器和后台服务；重新登录前先执行 `docker compose stop tp4by`。
+
+`tp4by-data` volume 保存登录 session、数据库和媒体原件。
 **不要执行 `docker compose down -v`，也不要单独清空媒体缓存。** 停服后整体备份 volume，数据库和原件须一起恢复。
 单实例运行；文件锁阻止共享同一目录的第二个进程。没有从旧 T4BY 数据库迁移的逻辑。
+
+### GitHub Actions 镜像发布
+
+`.github/workflows/docker.yml` 使用 Buildx/QEMU 构建 AMD64 和 ARM64 多架构镜像并推送到
+`ghcr.io/<仓库所有者>/tp4by`（Fork 时按实际仓库名生成）：
+
+- 推送到 `main`：发布 `latest`、`main` 和 `sha-<短提交号>`。
+- 推送 `v*` 标签：发布同名版本标签和 SHA 标签，不覆盖 `latest`。
+- Pull Request：仅验证双架构构建，不登录、不推送镜像。
+- 支持通过 Actions 页面手动运行；主分支运行时也会更新 `latest`。
+
+发布使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需配置额外的 Registry 密钥；仓库需允许 Actions 写入 Packages。
+首次发布后请在 GitHub Packages 设置中将镜像包设为 **Public**，才能匿名拉取；
+私有包需先使用具有 `read:packages` 权限的凭据执行 `docker login ghcr.io`。
+Fork 部署时请在 `.env` 中设置 `TP4BY_IMAGE` 为自己的镜像地址。构建工作流只发布镜像，不会自动部署服务器。
 
 ## 本地开发
 
@@ -97,4 +138,4 @@ Telegram 和 SQLite 无法组成分布式事务。发送请求使用持久计划
 已确认的批次不会再次发送；结果不确定时不提前清理旧版本。Telegram 的去重窗口有限，不能保证任意延迟重试下的绝对 exactly-once。
 重试耗尽时可能保留未完成的新批次和有效旧版本供检查。MAN 转发也可能因保护内容或原消息已删除而失败，此时错误通知先保留，原件转发任务持续等待。
 
-本仓库不发布镜像、不自动部署、不内置 Telegram 凭据。真实 Telegram 发送/删除需要配置账号后另行联调。
+本仓库通过 GitHub Actions 发布镜像，不自动部署、不内置 Telegram 凭据。真实 Telegram 发送/删除需要配置账号后另行联调。

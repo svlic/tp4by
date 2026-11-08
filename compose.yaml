@@ -1,5 +1,6 @@
 services:
   tp4by:
+    image: ${TP4BY_IMAGE:-ghcr.io/svlic/tp4by:latest}
     build: .
     init: true
     restart: unless-stopped
