@@ -1,0 +1,11 @@
+services:
+  tp4by:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - tp4by-data:/app/data
+    stop_grace_period: 60s
+volumes:
+  tp4by-data:

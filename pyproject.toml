@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tp4by"
+version = "0.1.0"
+description = "Single-writer Telegram media classifier"
+requires-python = ">=3.11"
+dependencies = ["Telethon>=1.36,<2", "Pillow>=10,<13", "ImageHash>=4.3,<5"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1", "ruff>=0.6,<1"]
+
+[project.scripts]
+tp4by = "tp4by.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
