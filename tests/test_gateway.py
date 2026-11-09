@@ -9,6 +9,7 @@ import imagehash
 import pytest
 from PIL import Image
 from telethon import functions, types
+from telethon.errors import PhotoExtInvalidError
 
 from tp4by.gateway import Gateway, TelethonGateway, _sent_ids
 
@@ -70,10 +71,10 @@ class FakeClient:
         assert chat == -100123
         return types.InputPeerChannel(123, 456)
 
-    async def upload_file(self, file):
+    async def upload_file(self, file, *, file_name=None):
         path = Path(file)
         self.uploads.append((path, path.read_bytes()))
-        return types.InputFile(len(self.uploads), 1, path.name, "digest")
+        return types.InputFile(len(self.uploads), 1, file_name or path.name, "digest")
 
     async def delete_messages(self, chat, ids, revoke):
         self.deleted.append((chat, ids, revoke))
@@ -82,6 +83,9 @@ class FakeClient:
         self.requests.append(request)
         if self.error:
             raise self.error
+        media = getattr(request, "media", None)
+        if isinstance(media, types.InputMediaUploadedPhoto) and Path(media.file.name).suffix not in {".jpg", ".png"}:
+            raise PhotoExtInvalidError(request)
         if isinstance(request, functions.messages.UploadMediaRequest):
             if isinstance(request.media, types.InputMediaUploadedPhoto):
                 photo = types.Photo(
@@ -248,6 +252,26 @@ def test_single_photo_and_text_use_raw_stable_random_ids(tmp_path):
     assert first.message == spec["text"] and not first.entities
     run(gw.send("up", spec, "another-token"))
     assert first.random_id != client.requests[-1].random_id
+
+
+@pytest.mark.parametrize("image_format,extension", [("JPEG", ".jpg"), ("PNG", ".png")])
+@pytest.mark.parametrize("count", [1, 2])
+def test_photos_from_extensionless_cache_upload_with_image_filename(tmp_path, image_format, extension, count):
+    stream = io.BytesIO()
+    with Image.open(io.BytesIO(picture())) as image:
+        image.convert("RGB").save(stream, image_format)
+    data = stream.getvalue()
+    client = FakeClient({i: message(data, photo=True) for i in range(1, count + 1)})
+    items = run(gateway(tmp_path, client).prepare(payload(list(client.messages))))
+    assert all(Path(item["path"]).name == "original" for item in items)
+    # Reuse existing persisted cache after restart, without downloading again.
+    client.messages.clear()
+    spec = {"type": "media", "items": items, "caption": "123456"}
+    assert run(gateway(tmp_path, client).send("up", spec, "cached-photos")) == list(range(100, 100 + count))
+    uploads = [request.media for request in client.requests if hasattr(request, "media")]
+    assert all(Path(media.file.name).suffix == extension for media in uploads)
+    assert all(upload[1] == data for upload in client.uploads)
+    assert all(Path(item["path"]).read_bytes() == data for item in items)
 
 
 @pytest.mark.parametrize("size", [0, 11])

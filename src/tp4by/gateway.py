@@ -263,8 +263,13 @@ class TelethonGateway:
         media = []
         for item in items:
             path = await asyncio.to_thread(_readable_copy, item)
-            uploaded = await self.client.upload_file(str(path))
             photo = item["kind"] == "image" and not item.get("as_document")
+            # Photo caches are named "original"; Telegram requires an image
+            # extension on the uploaded file, including for pre-existing caches.
+            filename = path.name
+            if photo:
+                filename = "photo" + (mimetypes.guess_extension(item.get("mime") or "image/jpeg") or ".jpg")
+            uploaded = await self.client.upload_file(str(path), file_name=filename)
             if photo:
                 value = types.InputMediaUploadedPhoto(file=uploaded)
             else:
