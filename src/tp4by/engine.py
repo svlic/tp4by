@@ -22,10 +22,10 @@ class Gateway(Protocol):
 
 
 def business_number(text: str) -> str:
-    numbers = set(NUMBER.findall(text))
-    if len(numbers) != 1:
-        raise ValueError("必须且只能包含一个不同的 6/7 位业务编号")
-    return numbers.pop()
+    match = NUMBER.search(text)
+    if match is None:
+        raise ValueError("必须包含 6/7 位业务编号")
+    return match.group()
 
 
 def expand(records: dict[int, dict], seeds: set[int], links=()) -> set[int]:

@@ -16,16 +16,18 @@ from tp4by.storage import Store
         ("a1234567!", "1234567"),
         ("012345", "012345"),
         ("", None),
-        ("123456 7654321", None),
+        ("123456 7654321", "123456"),
+        ("7654321\n123456", "7654321"),
+        ("12345678 012345 7654321", "012345"),
         ("12345 12345678", None),
         ("１２３４５６", None),
         ("١123456", None),
         ("123456٧", None),
     ],
 )
-def test_business_number_uniqueness_and_digit_boundaries(text, expected):
+def test_business_number_first_match_and_digit_boundaries(text, expected):
     if expected is None:
-        with pytest.raises(ValueError, match="必须且只能包含一个不同的 6/7 位业务编号"):
+        with pytest.raises(ValueError, match="必须包含 6/7 位业务编号"):
             business_number(text)
     else:
         assert business_number(text) == expected
@@ -305,7 +307,16 @@ async def test_long_numbers_sent_as_boundary_split_text_not_captions(system):
     assert " ".join(texts).split() == [str(1000000 + i) for i in range(600)]
 
 
-@pytest.mark.parametrize("text", ["no number", "12345 12345678", "123456 7654321"])
+async def test_multiple_business_numbers_archive_with_first_number(system):
+    store, gateway, engine = system
+    await add(system, "", ["A"], text="7654321 123456")
+    assert [record["business_no"] for record in store.records().values()] == ["7654321"]
+    assert gateway.media("oneshot")[0]["caption"] == "7654321 123456"
+    assert store.db.execute("SELECT status FROM jobs").fetchone()[0] == "done"
+    assert not await engine.report_failure()
+
+
+@pytest.mark.parametrize("text", ["no number", "12345 12345678"])
 async def test_business_errors_deliver_original_and_notice_to_man(system, text):
     store, gateway, engine = system
     payload = await add(system, "", ["A"], text=text)

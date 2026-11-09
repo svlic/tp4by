@@ -8,7 +8,7 @@ Python 3.11+ / Telethon 用户账号 / SQLite WAL。不包含 Reader、SOURCE、
 ## 业务行为
 
 - 六个独立频道：`from`、`oneshot`、`repeat`、`up`、`down`、`man`。
-- FROM 收齐相册后，以整组作为一条记录。业务编号为 6/7 位数字，不是主键。
+- FROM 收齐相册后，以整组作为一条记录。业务编号取合并文本中第一个匹配的 6/7 位数字，不是主键。
 - 图片（包括 document 发送、MIME 标注错误但能解码的图片）使用 **64 位 pHash 精确相等**；视频使用文件内容 SHA-256。
   Hash 键包含类型和算法，不使用图片相似度阈值或新增二次校验；纯色图片排除明确延期。
 - FROM 只按成功归档历史 Hash 判断：**DOWN > UP > REPEAT > ONESHOT**，不使用自身或编号命中。
