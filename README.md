@@ -32,19 +32,27 @@ Python 3.11+ / Telethon 用户账号 / SQLite WAL。不包含 Reader、SOURCE、
 需要一个 Telegram **用户账号**（不是 Bot Token），账号必须能够读取三个输入频道、在归档频道发媒体，并删除 ONESHOT/UP 的旧消息。
 六个频道必须互不相同。请先在测试频道验证权限和清理行为。
 
+### 直接拉取镜像部署（推荐，无需克隆源码）
+
+只下载 Compose 配置和环境变量模板，不需要 Git、Python 环境或本地构建：
+
 ```bash
-git clone https://github.com/svlic/tp4by.git
-cd tp4by
-cp .env.example .env
+mkdir -p tp4by && cd tp4by
+curl -fL https://raw.githubusercontent.com/svlic/tp4by/main/compose.yaml -o compose.yaml
+curl -fL https://raw.githubusercontent.com/svlic/tp4by/main/.env.example -o .env
 # 编辑 .env，填写 Writer API ID / API Hash 和六个频道 ID（也支持公开用户名）。
 docker compose pull
-docker compose run --rm --no-deps tp4by
+docker compose run --rm --no-deps --pull never tp4by
 ```
+
+下载 `.env` 模板仅用于首次部署，已有配置时不要重新下载覆盖。
+`docker compose pull` 直接拉取预构建镜像，不执行 Compose 文件中的 `build`；
+下方启动命令使用 `--no-build`，无需下载源码，也不会回退到本地构建。
 
 首次在交互终端输入手机号、验证码和可能的两步验证密码。看到 `T4BY started` 后按 Ctrl+C，再后台启动：
 
 ```bash
-docker compose up -d
+docker compose up -d --no-build --pull never
 docker compose logs -f tp4by
 ```
 
@@ -56,14 +64,21 @@ docker compose logs -f tp4by
 
 ```bash
 docker compose pull
-docker compose up -d
+docker compose up -d --no-build --pull never
 ```
 
 可在 `.env` 中添加 `TP4BY_IMAGE=ghcr.io/svlic/tp4by:v0.1.0` 固定到已发布的版本标签
 （示例标签，实际以仓库 Packages 为准），或使用 `sha-<短提交号>` 固定提交。
+
+### 从源码构建（可选）
+
 若镜像尚未发布，或需要运行本地修改，可从源码构建，无需访问 GHCR：
 
 ```bash
+git clone https://github.com/svlic/tp4by.git
+cd tp4by
+cp .env.example .env
+# 编辑 .env，填写账号和频道配置。
 docker compose build
 docker compose run --rm --no-deps --pull never tp4by
 # 完成首次登录并按 Ctrl+C 后：
