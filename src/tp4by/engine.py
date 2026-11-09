@@ -276,7 +276,14 @@ class Engine:
                     {"rid": r, "channel": channel, "ids": item["source"]["message_ids"], "steps": []}
                 )
             else:
-                steps = [send(channel, spec) for spec in batches(item["media"], item["source"].get("text", ""))]
+                source = item["source"]
+                if source.get("replaced"):
+                    # Manual UP originals were deleted after aggregation. Their
+                    # cached media must be republished rather than forwarded.
+                    specs = batches(item["media"], source.get("text", ""))
+                else:
+                    specs = [{"type": "forward", "chat_id": source["chat_id"], "message_ids": source["message_ids"]}]
+                steps = [send(channel, spec) for spec in specs]
                 plan["archives"].append({"rid": r, "channel": channel, "ids": [], "steps": steps})
 
         old_groups = {row["signature"]: dict(row) for row in db.execute("SELECT * FROM up_groups")}

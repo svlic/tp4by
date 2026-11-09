@@ -78,7 +78,8 @@ class FakeGateway:
         if self.fail and self.fail(channel, spec):
             raise OSError("injected network failure")
         if token not in self.accepted:
-            ids = list(range(10000 + len(self.sent) * 10, 10000 + len(self.sent) * 10 + len(spec.get("items", [1]))))
+            count = len(spec["message_ids"]) if spec["type"] == "forward" else len(spec.get("items", [1]))
+            ids = list(range(10000 + len(self.sent) * 10, 10000 + len(self.sent) * 10 + count))
             self.accepted[token] = ids
             self.sent.append((channel, copy.deepcopy(spec), ids))
             if self.uncertain:
@@ -91,6 +92,9 @@ class FakeGateway:
 
     def media(self, channel):
         return [spec for target, spec, _ in self.sent if target == channel and spec["type"] == "media"]
+
+    def forwards(self, channel):
+        return [spec for target, spec, _ in self.sent if target == channel and spec["type"] == "forward"]
 
 
 @pytest.fixture
@@ -110,7 +114,7 @@ async def add(system, number, keys, origin="from", event=None, text=None, docume
         "text": text or number,
         "keys": keys,
         "chat_id": -123,
-        "message_ids": [count + 1],
+        "message_ids": list(range(count * 100 + 1, count * 100 + 1 + len(keys))),
         "grouped": True,
         "documents": list(documents),
     }
@@ -130,11 +134,14 @@ def keys(spec):
 async def test_repeat_only_archives_new_input_and_event_replay_is_noop(system):
     store, gateway, engine = system
     first = await add(system, "123456", ["A", "B"])
-    await add(system, "234567", ["B", "C"])
-    await add(system, "345678", ["A", "D"])
+    second = await add(system, "234567", ["B", "C"])
+    third = await add(system, "345678", ["A", "D"])
     assert routes(store) == ["oneshot", "repeat", "repeat"]
-    assert [keys(s) for s in gateway.media("oneshot")] == [["A", "B"]]
-    assert [keys(s) for s in gateway.media("repeat")] == [["B", "C"], ["A", "D"]]
+    assert gateway.forwards("oneshot") == [
+        {"type": "forward", "chat_id": first["chat_id"], "message_ids": first["message_ids"]}
+    ]
+    assert [s["message_ids"] for s in gateway.forwards("repeat")] == [second["message_ids"], third["message_ids"]]
+    assert not gateway.media("oneshot") and not gateway.media("repeat")
     assert not gateway.deleted
     assert not store.enqueue(first)
     assert not await engine.tick()
@@ -161,28 +168,33 @@ async def test_manual_number_once_then_hash_closure_and_persistent_up_links(syst
 
 async def test_down_closure_incremental_and_manual_original_preserved(system):
     store, gateway, _ = system
-    await add(system, "222222", ["B", "C"])
-    await add(system, "333333", ["C", "D"])
+    first = await add(system, "222222", ["B", "C"])
+    second = await add(system, "333333", ["C", "D"])
     manual = await add(system, "111111", ["A", "B"], "down")
     assert routes(store) == ["down", "down", "down"]
-    assert [keys(s) for s in gateway.media("down")] == [["B", "C"], ["C", "D"]]
+    assert [s["message_ids"] for s in gateway.forwards("down")] == [first["message_ids"], second["message_ids"]]
     assert ("down", manual["message_ids"]) not in gateway.deleted
-    await add(system, "444444", ["D", "E"])
+    third = await add(system, "444444", ["D", "E"])
     assert sorted(r[0] for r in store.db.execute("SELECT hash FROM down_hashes")) == [
         f"image:phash:{k}" for k in "ABCDE"
     ]
-    assert [keys(s) for s in gateway.media("down")] == [["B", "C"], ["C", "D"], ["D", "E"]]
+    assert [s["message_ids"] for s in gateway.forwards("down")] == [
+        first["message_ids"],
+        second["message_ids"],
+        third["message_ids"],
+    ]
+    assert not gateway.media("down")
     assert [target for target, _ in gateway.deleted] == ["oneshot"]
 
 
 async def test_manual_down_number_seeds_disjoint_media_then_only_expands_hashes(system):
     store, gateway, _ = system
-    await add(system, "123456", ["A"])
-    await add(system, "234567", ["A", "C"])
+    first = await add(system, "123456", ["A"])
+    second = await add(system, "234567", ["A", "C"])
     await add(system, "234567", ["D"])
     manual = await add(system, "123456", ["B"], "down")
     assert routes(store) == ["down", "down", "oneshot", "down"]
-    assert [keys(spec) for spec in gateway.media("down")] == [["A"], ["A", "C"]]
+    assert [s["message_ids"] for s in gateway.forwards("down")] == [first["message_ids"], second["message_ids"]]
     assert ("down", manual["message_ids"]) not in gateway.deleted
     await add(system, "345678", ["B"])
     await add(system, "456789", ["D"])
@@ -192,13 +204,16 @@ async def test_manual_down_number_seeds_disjoint_media_then_only_expands_hashes(
 async def test_down_beats_up_for_entire_record_without_number_link_spill(system):
     store, gateway, _ = system
     await add(system, "123456", ["A"])
-    await add(system, "123456", ["B"], "up")  # Explicit disconnected number relation.
+    manual_up = await add(system, "123456", ["B"], "up")  # Explicit disconnected number relation.
     await add(system, "222222", ["A"], "down")
     assert routes(store) == ["down", "up", "down"]
     assert keys(gateway.media("up")[-1]) == ["B"]
-    await add(system, "333333", ["A", "B", "C"])
+    incoming = await add(system, "333333", ["A", "B", "C"])
     assert routes(store) == ["down", "down", "down", "down"]
-    assert keys(gateway.media("down")[-1]) == ["A", "B", "C"]
+    assert gateway.forwards("down")[-1]["message_ids"] == incoming["message_ids"]
+    # The manual UP original was cleaned up; only that record needs reuploading.
+    assert [keys(spec) for spec in gateway.media("down")] == [["B"]]
+    assert gateway.media("down")[0]["caption"] == manual_up["text"]
     assert store.db.execute("SELECT COUNT(*) FROM up_groups").fetchone()[0] == 0
 
 
@@ -309,9 +324,10 @@ async def test_long_numbers_sent_as_boundary_split_text_not_captions(system):
 
 async def test_multiple_business_numbers_archive_with_first_number(system):
     store, gateway, engine = system
-    await add(system, "", ["A"], text="7654321 123456")
+    payload = await add(system, "", ["A"], text="7654321 123456")
     assert [record["business_no"] for record in store.records().values()] == ["7654321"]
-    assert gateway.media("oneshot")[0]["caption"] == "7654321 123456"
+    assert gateway.forwards("oneshot")[0]["message_ids"] == payload["message_ids"]
+    assert not gateway.media("oneshot")
     assert store.db.execute("SELECT status FROM jobs").fetchone()[0] == "done"
     assert not await engine.report_failure()
 

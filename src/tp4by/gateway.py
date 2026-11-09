@@ -236,6 +236,8 @@ class TelethonGateway:
                     id=ids,
                     random_id=random_ids,
                     to_peer=peer,
+                    drop_author=False,
+                    drop_media_captions=False,
                 )
             )
             return _sent_ids(result, random_ids, peer)

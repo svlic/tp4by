@@ -338,6 +338,9 @@ def test_forward_has_stable_random_ids_and_duplicate_ack_is_uncertain(tmp_path):
     first, second = client.requests
     assert isinstance(first, functions.messages.ForwardMessagesRequest)
     assert first.id == [8, 9]
+    assert first.drop_author is False
+    assert first.drop_media_captions is False
+    assert not client.uploads
     assert first.random_id == second.random_id
     assert len(set(first.random_id)) == 2
     client.response = SimpleNamespace(updates=[])
